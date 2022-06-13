@@ -28,4 +28,7 @@ Route::delete('/user/{id}', [UserController::class, 'delete_user']);
 Route::post('/movement', [UserController::class, 'new_movement']);
 Route::get('/movements', [UserController::class, 'get_movements']);
 Route::delete('/movement/{user_id}/{mov_id}', [UserController::class, 'delete_movement']);
-Route::get('/csv_movements/{filter}', [UserController::class, 'csv_movements']);
+Route::get('/csv_movements/{id}', [UserController::class, 'csv_movements']);
+//
+Route::post('/edit_initial_balance/{id}', [UserController::class, 'edit_initial_balance']);
+Route::get('/sum_movements_initial_balance/{id}', [UserController::class, 'sum_movements_initial_balance']);

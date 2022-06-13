@@ -6,6 +6,10 @@ use App\Models\Movements;
 use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Carbon\Carbon;
+use Illuminate\Support\Facades\Storage;
+use League\Csv\Writer;
+use League\Csv\Reader;
 
 class UserController extends Controller
 {
@@ -14,12 +18,17 @@ class UserController extends Controller
         if (User::where('email', $request->email)->exists()) {
             return response('O e-mail informado já está cadastrado.');
         }
-        $user = User::create([
-            'name' => $request->name,
-            'email' => $request->email,
-            'birthday' => date("Y-m-d", strtotime($request->birthday))
-        ]);
-        return response('Usuário cadastrado com sucesso');
+        $age = Carbon::parse(date("Y-m-d", strtotime($request->birthday)))->age;
+        if ($age >= 18) {
+            $user = User::create([
+                'name' => $request->name,
+                'email' => $request->email,
+                'birthday' => date("Y-m-d", strtotime($request->birthday))
+            ]);
+            return response('Usuário cadastrado com sucesso');
+        } else {
+            return response('Apenas maiores de 18 anos podem se cadastrar');
+        }
     }
 
     public function get_users()
@@ -44,6 +53,9 @@ class UserController extends Controller
         if (!$user) {
             return response('Usuário não encontrado');
         } else {
+            if (Movements::where('id', $id)->exists()) {
+                return response('Não foi possível excluir o usuário pois o mesmo há movimentações em seu nome');
+            }
             $user->delete();
             return response('Usuário excluído com sucesso');
         }
@@ -101,24 +113,70 @@ class UserController extends Controller
         }
     }
 
-    public function csv_movements($filter, Request $request)
+    public function csv_movements($id, Request $request)
     {
-        if ($filter == '30dias') {
+        $user = User::find($id);
+        if (!$user) {
+            return response('Usuário não localizado');
+        } else if ($user) {
+            $movs = Movements::where('user_id', $id)->exists();
+            if (!$movs) {
+                return response('Nenhuma movimentação relacionada ao usuário foi encontrada');
+            }
+        }
+        if ($request->opcao == '30 dias') {
             $lista = DB::table('users')
                 ->join('movements', 'users.id', '=', 'movements.user_id')
-                ->select('users.name', 'users.email', 'users.birthday', 'movements.movement', 'movements.value', 'movements.created_at')
+                ->select('movements.movement', 'movements.value', 'movements.created_at')
+                ->where('movements.created_at', '>', now()->subDays(30)->endOfDay())->where('users.id', '=', $id)
                 ->get();
-            $file = $this->generate_csv($lista);
-            //dd($file);
+            $file = $this->generate_csv($lista, $id);
             return response($file);
         } else if (is_numeric(substr($request->opcao, 0, 2)) == true && substr($request->opcao, 2, 1) == '/' && is_numeric(substr($request->opcao, 3, 2)) == true) {
-
-            return response($request->opcao);
+            $lista = DB::table('users')
+                ->join('movements', 'users.id', '=', 'movements.user_id')
+                ->select('movements.movement', 'movements.value', 'movements.created_at')
+                ->whereBetween('movements.created_at', [substr($request->opcao, 3, 2) . '-' . substr($request->opcao, 0, 2) . '-' . '01', substr($request->opcao, 3, 2) . '-' . substr($request->opcao, 0, 2) . '-' . '31'])
+                ->where('users.id', '=', $id)
+                ->get();
+            $file = $this->generate_csv($lista, $id);
+            return response($file);
         } else if ($request->opcao == 'tudo') {
-
-            return response($request->opcao);
+            $lista = DB::table('users')
+                ->join('movements', 'users.id', '=', 'movements.user_id')
+                ->select('movements.movement', 'movements.value', 'movements.created_at')
+                ->where('users.id', '=', $id)
+                ->get();
+            $file = $this->generate_csv($lista, $id);
+            return response($file);
         } else {
             return response("Informe algum filtro válido para a geração do arquivo .csv");
+        }
+    }
+
+    public function edit_initial_balance($id, Request $request)
+    {
+        $user = User::find($id);
+        if ($user) {
+            if (isset($request->value) == true && $request->value > 0) {
+                $user_update = User::where('id', $id)->update(['initial_balance' => $request->value]);
+                return response('Saldo inicial atualizado');
+            } else {
+                return response('O valor de saldo informado é inválido');
+            }
+        } else {
+            return response('Usuário não localizado');
+        }
+    }
+
+    public function sum_movements_initial_balance($id)
+    {
+        $user = User::find($id);
+        if ($user) {
+            $movements_sum = Movements::where('user_id', $id)->sum('value');
+            return response('Valor de todas as movimentações mais saldo inicial : R$ ' . $movements_sum + $user->initial_balance);
+        } else {
+            return response('Usuário não localizado');
         }
     }
 
@@ -127,34 +185,18 @@ class UserController extends Controller
         return strtr(utf8_decode($string), utf8_decode('àáâãäçèéêëìíîïñòóôõöùúûüýÿÀÁÂÃÄÇÈÉÊËÌÍÎÏÑÒÓÔÕÖÙÚÛÜÝ'), 'aaaaaceeeeiiiinooooouuuuyyAAAAACEEEEIIIINOOOOOUUUUY');
     }
 
-    public function generate_csv($lista)
+    public function generate_csv($lista, $user_data = null)
     {
-        $cabecalho = array(
-            "Content-type"        => "text/csv",
-            "Content-Disposition" => "attachment; filename='relatorio.csv'",
-            "Pragma"              => "no-cache",
-            "Cache-Control"       => "must-revalidate, post-check=0, pre-check=0",
-            "Expires"             => "0"
-        );
-
-        $colunas = array('Nome', 'Email', 'Aniversario', 'Operacao', 'Valor', 'Data da operacao');
-
-        $callback = function () use ($lista, $colunas) {
-            $file = fopen('php://output', 'w');
-            fputcsv($file, $colunas);
-
-            foreach ($lista as $item) {
-                $row['Nome']  = $item->name;
-                $row['Email']    = $item->email;
-                $row['Aniversario']    = $item->birthday;
-                $row['Operacao']  = $item->movement;
-                $row['Valor']  = $item->value;
-                $row['Data_da_operacao']  = $item->created_at;
-                fputcsv($file, array($row['Nome'], $row['Email'], $row['Aniversario'], $row['Operacao'], $row['Valor'], $row['Data_da_operacao']));
-            }
-            fclose($file);
-        };
-        dd($lista);
-        return response()->stream($callback, 200, $cabecalho);
+        $user = User::find($user_data);
+        $csv = Writer::createFromFileObject(new \SplTempFileObject());
+        if($user_data){
+            $csv->insertOne(['Nome', 'Email', 'Aniversario','Saldo Inicial']);
+            $csv->insertOne([$user->name, $user->email, $user->birthday, $user->initial_balance]);
+        }
+        $csv->insertOne(['Operacao', 'Valor', 'Data da operacao']);
+        foreach ($lista as $item) {
+            $csv->insertOne((array)$item);
+        }
+        $csv->output('relatorio' . Carbon::now() . '.csv');
     }
 }
